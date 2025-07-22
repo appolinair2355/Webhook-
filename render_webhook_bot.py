@@ -225,3 +225,46 @@ if __name__ == "__main__":
     logger.info(f"🚀 Lancement serveur Flask sur le port {port}")
     setup_bot()
     app.run(host="0.0.0.0", port=port)
+
+
+    import logging
+import os
+from telegram import Update
+from telegram.ext import (
+    Application, CommandHandler, ContextTypes
+)
+
+from env_loader import load_env
+
+# Charger les variables d'environnement (.env)
+load_env()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # À définir dans Render
+
+logging.basicConfig(level=logging.INFO)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Bot en ligne !")
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Voici comment utiliser ce bot...")
+
+# ✅ Créer l'application avec .initialize
+async def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+
+    # ✅ Initialisation correcte du webhook
+    await app.initialize()
+    await app.bot.set_webhook(WEBHOOK_URL)
+    await app.start()
+    await app.updater.start_webhook()
+
+    logging.info("✅ Webhook lancé")
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
