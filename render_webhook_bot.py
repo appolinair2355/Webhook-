@@ -1,218 +1,134 @@
 #!/usr/bin/env python3
 """
-Bot Telegram avec webhook optimisé pour Render.com
+Bot Telegram avec webhook Flask pour Render.com
 """
+
 import os
 import logging
 import json
-import re
 import asyncio
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from telegram import Update
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters, ContextTypes
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
 )
+from style import afficher_compteurs_canal
+from compteur import get_compteurs, update_compteurs, reset_compteurs_canal
 from dotenv import load_dotenv
-from env_loader import load_env
-# Charger .env (utile pour local)
+
+# Chargement des variables d’environnement
 load_dotenv()
 
-# Config logger
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Configuration du logger
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# Flask app
+# Flask app pour Render Web Service
 app = Flask(__name__)
 
-# Variables globales
+# Application Telegram (sera initialisée dans setup_bot)
 bot_app = None
-style_affichage = 1
-processed_messages = set()
-DATA_FILE = "data.json"
+processed_messages = {}
 
-# Fonctions de compteur
-def charger_donnees():
-    if not os.path.exists(DATA_FILE):
-        return {}
-    with open(DATA_FILE, "r") as f:
-        return json.load(f)
+# ========================
+# Fonctions de Commandes
+# ========================
 
-def sauvegarder_donnees(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f)
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🤖 Bot actif et prêt !")
 
-def get_compteurs(channel_id):
-    data = charger_donnees()
-    return data.get(str(channel_id), {"❤️": 0, "♦️": 0, "♣️": 0, "♠️": 0})
 
-def update_compteurs(channel_id, symbole, count):
-    data = charger_donnees()
-    if str(channel_id) not in data:
-        data[str(channel_id)] = {"❤️": 0, "♦️": 0, "♣️": 0, "♠️": 0}
-    data[str(channel_id)][symbole] += count
-    sauvegarder_donnees(data)
+async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    channel_id = str(update.effective_chat.id)
+    reset_compteurs_canal(channel_id)
+    await update.message.reply_text("🔄 Compteurs réinitialisés !")
 
-def reset_compteurs_canal(channel_id):
-    data = charger_donnees()
-    data[str(channel_id)] = {"❤️": 0, "♦️": 0, "♣️": 0, "♠️": 0}
-    sauvegarder_donnees(data)
 
-# Style d'affichage
-def afficher_compteurs_canal(compteurs, style):
-    if style == 1:
-        return "\n".join([f"{sym} : {val}" for sym, val in compteurs.items()])
-    elif style == 2:
-        return " | ".join([f"{sym}={val}" for sym, val in compteurs.items()])
-    elif style == 3:
-        return "\n".join([f"{sym} {'🟩'*val}" for sym, val in compteurs.items()])
-    elif style == 4:
-        return "\n".join([f"{sym} → {val}" for sym, val in compteurs.items()])
-    elif style == 5:
-        return "\n".join([f"{sym}: {val} 🔢" for sym, val in compteurs.items()])
-    else:
-        return str(compteurs)
+async def style_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🎨 Cette commande changera le style (à implémenter).")
 
-# Messages déjà traités
+
+# ========================
+# Gestion des messages
+# ========================
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if not message:
+        return
+
+    text = message.text or ""
+    if "(" in text:
+        cards = extract_cards(text)
+        if cards:
+            canal_id = str(update.effective_chat.id)
+            update_compteurs(canal_id, cards)
+            await message.reply_text(afficher_compteurs_canal(canal_id))
+            save_processed_message(update.effective_chat.id, message.message_id)
+
+
+def extract_cards(text):
+    import re
+    match = re.search(r"\((.*?)\)", text)
+    if match:
+        cards_text = match.group(1)
+        return [c.strip() for c in cards_text.split() if c.strip()]
+    return []
+
+# ========================
+# Sauvegarde des messages
+# ========================
+
+def save_processed_message(channel_id, message_id):
+    global processed_messages
+    channel_id = str(channel_id)
+    if channel_id not in processed_messages:
+        processed_messages[channel_id] = []
+    if message_id not in processed_messages[channel_id]:
+        processed_messages[channel_id].append(message_id)
+        with open("processed.json", "w") as f:
+            json.dump(processed_messages, f)
+
+
 def load_processed_messages():
     global processed_messages
-    try:
-        with open("processed_messages.json", "r") as f:
-            processed_messages = set(json.load(f))
-    except:
-        processed_messages = set()
+    if os.path.exists("processed.json"):
+        with open("processed.json", "r") as f:
+            processed_messages = json.load(f)
 
-def save_processed_messages():
-    with open("processed_messages.json", "w") as f:
-        json.dump(list(processed_messages), f)
 
-def is_message_processed(key):
-    return key in processed_messages
+# ========================
+# Configuration du bot
+# ========================
 
-def mark_message_processed(key):
-    processed_messages.add(key)
-
-# Gestion des messages
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global style_affichage
-    try:
-        msg = update.message or update.channel_post or update.edited_channel_post or update.edited_message
-        if not msg or not msg.text:
-            return
-
-        text = msg.text
-        chat_id = msg.chat_id
-        match_num = re.search(r"#n(\d+)", text)
-        is_edit = update.edited_message or update.edited_channel_post
-
-        if match_num:
-            numero = int(match_num.group(1))
-            key = f"{chat_id}_{numero}"
-            if is_message_processed(key) and not is_edit:
-                return
-            mark_message_processed(key)
-            save_processed_messages()
-
-        match = re.search(r"\(([^()]*)\)", text)
-        if not match:
-            return
-        content = match.group(1)
-
-        found = {}
-        total = 0
-        coeur = content.count("❤️") + content.count("♥️")
-        if coeur > 0:
-            update_compteurs(chat_id, "❤️", coeur)
-            found["❤️"] = coeur
-
-        for sym in ["♦️", "♣️", "♠️"]:
-            count = content.count(sym)
-            if count > 0:
-                update_compteurs(chat_id, sym, count)
-                found[sym] = count
-
-        if not found:
-            return
-
-        compteurs = get_compteurs(chat_id)
-        response = afficher_compteurs_canal(compteurs, style_affichage)
-        await msg.reply_text(response)
-
-    except Exception as e:
-        logger.error(f"Erreur traitement message : {e}")
-
-# Commande /start
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🃏 Bienvenue ! Envoyez un message contenant des cartes entre parenthèses, exemple : (❤️♦️♣️♠️)\n\n"
-        "Commandes disponibles :\n"
-        "/reset — Réinitialiser les compteurs\n"
-        "/style 1-5 — Changer le style d'affichage"
-    )
-
-# Commande /reset
-async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
-    reset_compteurs_canal(chat_id)
-    await update.message.reply_text("✅ Compteurs réinitialisés.")
-
-# Commande /style
-async def style_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global style_affichage
-    if not context.args:
-        await update.message.reply_text("Utilisation : /style [1-5]")
-        return
-    try:
-        val = int(context.args[0])
-        if 1 <= val <= 5:
-            style_affichage = val
-            await update.message.reply_text(f"🎨 Style changé : {val}")
-        else:
-            await update.message.reply_text("Style invalide. Choisir entre 1 et 5.")
-    except:
-        await update.message.reply_text("Erreur : /style [1-5]")
-
-# Webhook route
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    try:
-        update_data = request.get_json(force=True)
-        update = Update.de_json(update_data, bot_app.bot)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(bot_app.process_update(update))
-        loop.close()
-        return jsonify({"status": "ok"})
-    except Exception as e:
-        logger.error(f"Erreur webhook : {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok", "service": "telegram_bot", "webhook": True})
-
-@app.route("/")
-def index():
-    return jsonify({"status": "active", "info": "Telegram bot via Flask + webhook"})
-
-# Initialisation
 def setup_bot():
     global bot_app
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("❌ TELEGRAM_BOT_TOKEN non défini dans les variables d’environnement.")
+    
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     bot_app = Application.builder().token(token).build()
+
     bot_app.add_handler(CommandHandler("start", start_cmd))
     bot_app.add_handler(CommandHandler("reset", reset_cmd))
     bot_app.add_handler(CommandHandler("style", style_cmd))
     bot_app.add_handler(MessageHandler(filters.ALL, handle_message))
 
+    loop.run_until_complete(bot_app.initialize())
+
     render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
     if render_host:
         webhook_url = f"https://{render_host}/webhook"
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         loop.run_until_complete(bot_app.bot.set_webhook(url=webhook_url))
-        loop.close()
         logger.info(f"✅ Webhook configuré : {webhook_url}")
     else:
         logger.warning("RENDER_EXTERNAL_HOSTNAME non défini.")
@@ -220,51 +136,27 @@ def setup_bot():
     load_processed_messages()
     logger.info("✅ Bot prêt.")
 
+
+# ========================
+# Route Flask pour Webhook
+# ========================
+
+@app.route("/webhook", methods=["POST"])
+async def webhook():
+    if request.method == "POST":
+        try:
+            update = Update.de_json(request.get_json(force=True), bot_app.bot)
+            await bot_app.process_update(update)
+        except Exception as e:
+            logger.error(f"Erreur dans le webhook : {e}")
+        return "ok", 200
+
+
+# ========================
+# Point d’entrée Render
+# ========================
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    logger.info(f"🚀 Lancement serveur Flask sur le port {port}")
     setup_bot()
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
-
-    import logging
-import os
-from telegram import Update
-from telegram.ext import (
-    Application, CommandHandler, ContextTypes
-)
-
-from env_loader import load_env
-
-# Charger les variables d'environnement (.env)
-load_env()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # À définir dans Render
-
-logging.basicConfig(level=logging.INFO)
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot en ligne !")
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Voici comment utiliser ce bot...")
-
-# ✅ Créer l'application avec .initialize
-async def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-
-    # ✅ Initialisation correcte du webhook
-    await app.initialize()
-    await app.bot.set_webhook(WEBHOOK_URL)
-    await app.start()
-    await app.updater.start_webhook()
-
-    logging.info("✅ Webhook lancé")
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
