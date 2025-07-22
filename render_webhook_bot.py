@@ -13,7 +13,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes
 )
 from dotenv import load_dotenv
-
+from config.env_loader import load_env
 # Charger .env (utile pour local)
 load_dotenv()
 
