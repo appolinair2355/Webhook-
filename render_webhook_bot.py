@@ -1,7 +1,6 @@
-
 #!/usr/bin/env python3
 """
-Bot Telegram avec webhook optimisé pour Render.com - Version finale
+Bot Telegram avec webhook optimisé pour Render.com
 """
 import os
 import logging
@@ -9,28 +8,72 @@ import json
 import re
 import asyncio
 from flask import Flask, request, jsonify
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from compteur import get_compteurs, update_compteurs, reset_compteurs_canal
-from style import afficher_compteurs_canal
-
-# Configuration logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+from telegram import Update
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters, ContextTypes
 )
+from dotenv import load_dotenv
+
+# Charger .env (utile pour local)
+load_dotenv()
+
+# Config logger
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Flask app pour webhook
+# Flask app
 app = Flask(__name__)
 
 # Variables globales
 bot_app = None
 style_affichage = 1
 processed_messages = set()
+DATA_FILE = "data.json"
 
+# Fonctions de compteur
+def charger_donnees():
+    if not os.path.exists(DATA_FILE):
+        return {}
+    with open(DATA_FILE, "r") as f:
+        return json.load(f)
+
+def sauvegarder_donnees(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f)
+
+def get_compteurs(channel_id):
+    data = charger_donnees()
+    return data.get(str(channel_id), {"❤️": 0, "♦️": 0, "♣️": 0, "♠️": 0})
+
+def update_compteurs(channel_id, symbole, count):
+    data = charger_donnees()
+    if str(channel_id) not in data:
+        data[str(channel_id)] = {"❤️": 0, "♦️": 0, "♣️": 0, "♠️": 0}
+    data[str(channel_id)][symbole] += count
+    sauvegarder_donnees(data)
+
+def reset_compteurs_canal(channel_id):
+    data = charger_donnees()
+    data[str(channel_id)] = {"❤️": 0, "♦️": 0, "♣️": 0, "♠️": 0}
+    sauvegarder_donnees(data)
+
+# Style d'affichage
+def afficher_compteurs_canal(compteurs, style):
+    if style == 1:
+        return "\n".join([f"{sym} : {val}" for sym, val in compteurs.items()])
+    elif style == 2:
+        return " | ".join([f"{sym}={val}" for sym, val in compteurs.items()])
+    elif style == 3:
+        return "\n".join([f"{sym} {'🟩'*val}" for sym, val in compteurs.items()])
+    elif style == 4:
+        return "\n".join([f"{sym} → {val}" for sym, val in compteurs.items()])
+    elif style == 5:
+        return "\n".join([f"{sym}: {val} 🔢" for sym, val in compteurs.items()])
+    else:
+        return str(compteurs)
+
+# Messages déjà traités
 def load_processed_messages():
-    """Charge les messages traités depuis le fichier"""
     global processed_messages
     try:
         with open("processed_messages.json", "r") as f:
@@ -39,245 +82,146 @@ def load_processed_messages():
         processed_messages = set()
 
 def save_processed_messages():
-    """Sauvegarde les messages traités"""
-    try:
-        with open("processed_messages.json", "w") as f:
-            json.dump(list(processed_messages), f)
-    except:
-        pass
+    with open("processed_messages.json", "w") as f:
+        json.dump(list(processed_messages), f)
 
-def is_message_processed(message_key):
-    """Vérifie si un message a déjà été traité"""
-    return message_key in processed_messages
+def is_message_processed(key):
+    return key in processed_messages
 
-def mark_message_processed(message_key):
-    """Marque un message comme traité"""
-    processed_messages.add(message_key)
+def mark_message_processed(key):
+    processed_messages.add(key)
 
+# Gestion des messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gère les messages entrants et édités"""
     global style_affichage
-    
     try:
         msg = update.message or update.channel_post or update.edited_channel_post or update.edited_message
         if not msg or not msg.text:
             return
-        
+
         text = msg.text
         chat_id = msg.chat_id
-        is_edited = update.edited_channel_post or update.edited_message
-        
-        logger.info(f"Canal {chat_id}: {'[EDITÉ] ' if is_edited else ''}{text[:80]}")
-        
-        # Vérifie le numéro de message
-        match_numero = re.search(r"#n(\d+)", text)
-        if not match_numero:
-            match = re.search(r'\(([^()]*)\)', text)
-            if not match:
+        match_num = re.search(r"#n(\d+)", text)
+        is_edit = update.edited_message or update.edited_channel_post
+
+        if match_num:
+            numero = int(match_num.group(1))
+            key = f"{chat_id}_{numero}"
+            if is_message_processed(key) and not is_edit:
                 return
-            content = match.group(1)
-        else:
-            numero = int(match_numero.group(1))
-            message_key = f"{chat_id}_{numero}"
-            
-            # Vérifie les indicateurs de progression
-            progress_indicators = ['⏰', '▶', '🕐', '➡️']
-            confirmation_symbols = ['✅', '🔰']
-            
-            has_progress = any(indicator in text for indicator in progress_indicators)
-            has_confirmation = any(symbol in text for symbol in confirmation_symbols)
-            
-            if has_progress and not has_confirmation:
-                logger.info(f"Message #{numero} a des indicateurs de progression, attente de la version finale")
-                return
-            
-            if is_message_processed(message_key):
-                if not is_edited:
-                    logger.info(f"Message #{numero} déjà traité et non édité, ignoré")
-                    return
-                else:
-                    logger.info(f"Message #{numero} a été édité, retraitement...")
-            
-            mark_message_processed(message_key)
+            mark_message_processed(key)
             save_processed_messages()
-            
-            match = re.search(r'\(([^()]*)\)', text)
-            if not match:
-                return
-            content = match.group(1)
-        
-        logger.info(f"Canal {chat_id} - Contenu: '{content}'")
-        
-        # Compte les symboles de cartes
-        cards_found = {}
-        total_cards = 0
-        
-        heart_count = content.count("❤️") + content.count("♥️")
-        if heart_count > 0:
-            update_compteurs(chat_id, "❤️", heart_count)
-            cards_found["❤️"] = heart_count
-            total_cards += heart_count
-        
-        for symbol in ["♦️", "♣️", "♠️"]:
-            count = content.count(symbol)
+
+        match = re.search(r"\(([^()]*)\)", text)
+        if not match:
+            return
+        content = match.group(1)
+
+        found = {}
+        total = 0
+        coeur = content.count("❤️") + content.count("♥️")
+        if coeur > 0:
+            update_compteurs(chat_id, "❤️", coeur)
+            found["❤️"] = coeur
+
+        for sym in ["♦️", "♣️", "♠️"]:
+            count = content.count(sym)
             if count > 0:
-                update_compteurs(chat_id, symbol, count)
-                cards_found[symbol] = count
-                total_cards += count
-        
-        if not cards_found:
-            logger.info(f"Aucun symbole de carte trouvé dans: '{content}'")
-            return
-        
-        logger.info(f"Canal {chat_id} - Cartes comptées: {cards_found}")
-        
-        compteurs_updated = get_compteurs(chat_id)
-        response = afficher_compteurs_canal(compteurs_updated, style_affichage)
-        
-        try:
-            await msg.reply_text(response)
-            logger.info(f"Réponse envoyée au canal {chat_id}")
-        except Exception as send_error:
-            if "Flood control exceeded" in str(send_error):
-                logger.warning(f"Anti-flood activé, message ignoré: {send_error}")
-            else:
-                logger.error(f"Erreur envoi réponse: {send_error}")
-        
-    except Exception as e:
-        logger.error(f"Erreur lors du traitement du message: {e}")
+                update_compteurs(chat_id, sym, count)
+                found[sym] = count
 
-async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande de reset"""
-    try:
-        if not update.message:
+        if not found:
             return
-            
-        chat_id = update.message.chat_id
-        reset_compteurs_canal(chat_id)
-        
-        global processed_messages
-        processed_messages = {key for key in processed_messages if not key.startswith(f"{chat_id}_")}
-        save_processed_messages()
-        
-        await update.message.reply_text("✅ Reset effectué pour ce canal")
-        
-    except Exception as e:
-        logger.error(f"Erreur dans la commande reset: {e}")
 
+        compteurs = get_compteurs(chat_id)
+        response = afficher_compteurs_canal(compteurs, style_affichage)
+        await msg.reply_text(response)
+
+    except Exception as e:
+        logger.error(f"Erreur traitement message : {e}")
+
+# Commande /start
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande start"""
-    try:
-        welcome_msg = (
-            "🤖 **Bot de Comptage de Cartes** 🃏\n\n"
-            "Bonjour ! Je compte les cartes séparément pour chaque canal.\n\n"
-            "📝 **Comment ça marche :**\n"
-            "• Envoyez un message avec des cartes entre parenthèses\n"
-            "• Exemple : Résultat du tirage (❤️♦️♣️♠️)\n\n"
-            "🎯 **Symboles reconnus :**\n"
-            "❤️ Cœurs • ♦️ Carreaux • ♣️ Trèfles • ♠️ Piques\n\n"
-            "📊 **Compteurs séparés par canal !**\n"
-            "⚡ Bot actif avec webhook sur Render.com !"
-        )
-        await update.message.reply_text(welcome_msg)
-        
-    except Exception as e:
-        logger.error(f"Erreur dans la commande start: {e}")
+    await update.message.reply_text(
+        "🃏 Bienvenue ! Envoyez un message contenant des cartes entre parenthèses, exemple : (❤️♦️♣️♠️)\n\n"
+        "Commandes disponibles :\n"
+        "/reset — Réinitialiser les compteurs\n"
+        "/style 1-5 — Changer le style d'affichage"
+    )
 
-# Route webhook principal
-@app.route('/webhook', methods=['POST'])
+# Commande /reset
+async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    reset_compteurs_canal(chat_id)
+    await update.message.reply_text("✅ Compteurs réinitialisés.")
+
+# Commande /style
+async def style_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global style_affichage
+    if not context.args:
+        await update.message.reply_text("Utilisation : /style [1-5]")
+        return
+    try:
+        val = int(context.args[0])
+        if 1 <= val <= 5:
+            style_affichage = val
+            await update.message.reply_text(f"🎨 Style changé : {val}")
+        else:
+            await update.message.reply_text("Style invalide. Choisir entre 1 et 5.")
+    except:
+        await update.message.reply_text("Erreur : /style [1-5]")
+
+# Webhook route
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    """Endpoint webhook pour recevoir les mises à jour de Telegram"""
     try:
         update_data = request.get_json(force=True)
         update = Update.de_json(update_data, bot_app.bot)
-        
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(bot_app.process_update(update))
-        finally:
-            loop.close()
-        
+        loop.run_until_complete(bot_app.process_update(update))
+        loop.close()
         return jsonify({"status": "ok"})
     except Exception as e:
-        logger.error(f"Erreur webhook: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        logger.error(f"Erreur webhook : {e}")
+        return jsonify({"error": str(e)}), 500
 
-# Route de santé pour Render.com
-@app.route('/health')
+@app.route("/health")
 def health():
-    """Endpoint de santé pour Render.com"""
-    return jsonify({
-        "status": "healthy", 
-        "bot": "running",
-        "service": "webhook_active",
-        "timestamp": str(__import__('datetime').datetime.now())
-    })
+    return jsonify({"status": "ok", "service": "telegram_bot", "webhook": True})
 
-# Route principale
-@app.route('/')
+@app.route("/")
 def index():
-    """Page d'accueil avec informations du service"""
-    return jsonify({
-        "service": "Bot Telegram Webhook - Render.com Ready",
-        "status": "active",
-        "webhook_url": "/webhook",
-        "health_url": "/health",
-        "port": os.environ.get("PORT", "Auto-detected"),
-        "version": "2.0.0"
-    })
+    return jsonify({"status": "active", "info": "Telegram bot via Flask + webhook"})
 
+# Initialisation
 def setup_bot():
-    """Configure le bot Telegram avec webhook"""
     global bot_app
-    
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        # Fallback vers token par défaut pour développement seulement
-        token = "7749786995:AAGr9rk_uuykLLp5g7Hi3XwIlsdMfW9pWFw"
-        logger.warning("⚠️ Utilisation du token de développement - CONFIGUREZ TELEGRAM_BOT_TOKEN en production!")
-    
-    if not token:
-        logger.error("TELEGRAM_BOT_TOKEN non défini!")
-        raise ValueError("TELEGRAM_BOT_TOKEN non défini")
-    
+        raise ValueError("❌ TELEGRAM_BOT_TOKEN non défini dans les variables d’environnement.")
     bot_app = Application.builder().token(token).build()
-    
     bot_app.add_handler(CommandHandler("start", start_cmd))
     bot_app.add_handler(CommandHandler("reset", reset_cmd))
+    bot_app.add_handler(CommandHandler("style", style_cmd))
     bot_app.add_handler(MessageHandler(filters.ALL, handle_message))
-    
-    webhook_url = os.getenv("WEBHOOK_URL")
-    if webhook_url:
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(bot_app.bot.set_webhook(url=f"{webhook_url}/webhook"))
-                logger.info(f"✅ Webhook configuré: {webhook_url}/webhook")
-            finally:
-                loop.close()
-        except Exception as e:
-            logger.error(f"Erreur configuration webhook: {e}")
+
+    render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    if render_host:
+        webhook_url = f"https://{render_host}/webhook"
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(bot_app.bot.set_webhook(url=webhook_url))
+        loop.close()
+        logger.info(f"✅ Webhook configuré : {webhook_url}")
     else:
-        logger.warning("WEBHOOK_URL non définie - webhook non configuré")
-    
+        logger.warning("RENDER_EXTERNAL_HOSTNAME non défini.")
+
     load_processed_messages()
-    logger.info("✅ Bot configuré avec succès")
+    logger.info("✅ Bot prêt.")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    
-    logger.info(f"🚀 Démarrage du serveur webhook sur le port {port}")
-    logger.info(f"🌐 Configuration Render.com détectée")
-    
-    try:
-        setup_bot()
-        app.run(
-            host="0.0.0.0", 
-            port=port, 
-            debug=False,
-            threaded=True
-        )
-    except Exception as e:
-        logger.error(f"Erreur démarrage: {e}")
+    logger.info(f"🚀 Lancement serveur Flask sur le port {port}")
+    setup_bot()
+    app.run(host="0.0.0.0", port=port)
