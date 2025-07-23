@@ -9,7 +9,7 @@ import re
 from flask import Flask, request, jsonify
 from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from launch_bot.py
+import launch_bot
 from compteur import get_compteurs, update_compteurs, reset_compteurs_canal
 from style import afficher_compteurs_canal
 
