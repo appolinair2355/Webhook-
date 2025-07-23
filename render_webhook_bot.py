@@ -1,301 +1,171 @@
-
 #!/usr/bin/env python3
 """
-Bot Telegram avec webhook optimisé pour Render.com - Version finale
+Bot Telegram avec webhook Flask + interface API pour Render.com
 """
 import os
 import logging
 import json
 import re
 import asyncio
-from flask import Flask, request, jsonify
-from telegram import Update, Bot
 import launch_bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from compteur import get_compteurs, update_compteurs, reset_compteurs_canal
-from style import afficher_compteurs_canal
-
-# Configuration logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+from flask import Flask, request, jsonify
+from telegram import Update
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters, ContextTypes
 )
+from compteur import get_compteurs, update_compteurs, reset_compteurs_canal
+from style import afficher_compteurs_canal, get_all_styles
+from historique import (
+    message_deja_traite, ajouter_message_traite,
+    get_messages_count, reset_messages_traite
+)
+from dotenv import load_dotenv
+
+# Chargement des variables d'environnement
+load_dotenv()
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+# Configuration du logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Flask app pour webhook
+# Flask App
 app = Flask(__name__)
+current_style = 1  # Style d'affichage par défaut
 
-# Variables globales
-bot_app = None
-style_affichage = 1
-processed_messages = set()
-
-def load_processed_messages():
-    """Charge les messages traités depuis le fichier"""
-    global processed_messages
+# ========== ROUTES FLASK API ==========
+def get_bot_status():
     try:
-        with open("processed_messages.json", "r") as f:
-            processed_messages = set(json.load(f))
-    except:
-        processed_messages = set()
+        with open("bot_status.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"running": False, "last_message": "Bot not started", "error": None}
+    except json.JSONDecodeError:
+        return {"running": False, "last_message": "Error reading status", "error": "JSON decode error"}
 
-def save_processed_messages():
-    """Sauvegarde les messages traités"""
-    try:
-        with open("processed_messages.json", "w") as f:
-            json.dump(list(processed_messages), f)
-    except:
-        pass
-
-def is_message_processed(message_key):
-    """Vérifie si un message a déjà été traité"""
-    return message_key in processed_messages
-
-def mark_message_processed(message_key):
-    """Marque un message comme traité"""
-    processed_messages.add(message_key)
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gère les messages entrants et édités"""
-    global style_affichage
-    
-    try:
-        msg = update.message or update.channel_post or update.edited_channel_post or update.edited_message
-        if not msg or not msg.text:
-            return
-        
-        text = msg.text
-        chat_id = msg.chat_id
-        is_edited = update.edited_channel_post or update.edited_message
-        
-        logger.info(f"Canal {chat_id}: {'[EDITÉ] ' if is_edited else ''}{text[:80]}")
-        
-        # Vérifie le numéro de message
-        match_numero = re.search(r"#n(\d+)", text)
-        if not match_numero:
-            match = re.search(r'\(([^()]*)\)', text)
-            if not match:
-                return
-            content = match.group(1)
-        else:
-            numero = int(match_numero.group(1))
-            message_key = f"{chat_id}_{numero}"
-            
-            # Vérifie les indicateurs de progression
-            progress_indicators = ['⏰', '▶', '🕐', '➡️']
-            confirmation_symbols = ['✅', '🔰']
-            
-            has_progress = any(indicator in text for indicator in progress_indicators)
-            has_confirmation = any(symbol in text for symbol in confirmation_symbols)
-            
-            if has_progress and not has_confirmation:
-                logger.info(f"Message #{numero} a des indicateurs de progression, attente de la version finale")
-                return
-            
-            if is_message_processed(message_key):
-                if not is_edited:
-                    logger.info(f"Message #{numero} déjà traité et non édité, ignoré")
-                    return
-                else:
-                    logger.info(f"Message #{numero} a été édité, retraitement...")
-            
-            mark_message_processed(message_key)
-            save_processed_messages()
-            
-            match = re.search(r'\(([^()]*)\)', text)
-            if not match:
-                return
-            content = match.group(1)
-        
-        logger.info(f"Canal {chat_id} - Contenu: '{content}'")
-        
-        # Compte les symboles de cartes
-        cards_found = {}
-        total_cards = 0
-        
-        heart_count = content.count("❤️") + content.count("♥️")
-        if heart_count > 0:
-            update_compteurs(chat_id, "❤️", heart_count)
-            cards_found["❤️"] = heart_count
-            total_cards += heart_count
-        
-        for symbol in ["♦️", "♣️", "♠️"]:
-            count = content.count(symbol)
-            if count > 0:
-                update_compteurs(chat_id, symbol, count)
-                cards_found[symbol] = count
-                total_cards += count
-        
-        if not cards_found:
-            logger.info(f"Aucun symbole de carte trouvé dans: '{content}'")
-            return
-        
-        logger.info(f"Canal {chat_id} - Cartes comptées: {cards_found}")
-        
-        compteurs_updated = get_compteurs(chat_id)
-        response = afficher_compteurs_canal(compteurs_updated, style_affichage)
-        
-        try:
-            await msg.reply_text(response)
-            logger.info(f"Réponse envoyée au canal {chat_id}")
-        except Exception as send_error:
-            if "Flood control exceeded" in str(send_error):
-                logger.warning(f"Anti-flood activé, message ignoré: {send_error}")
-            else:
-                logger.error(f"Erreur envoi réponse: {send_error}")
-        
-    except Exception as e:
-        logger.error(f"Erreur lors du traitement du message: {e}")
-
-async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande de reset"""
-    try:
-        if not update.message:
-            return
-            
-        chat_id = update.message.chat_id
-        reset_compteurs_canal(chat_id)
-        
-        global processed_messages
-        processed_messages = {key for key in processed_messages if not key.startswith(f"{chat_id}_")}
-        save_processed_messages()
-        
-        await update.message.reply_text("✅ Reset effectué pour ce canal")
-        
-    except Exception as e:
-        logger.error(f"Erreur dans la commande reset: {e}")
-
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande start"""
-    try:
-        welcome_msg = (
-            "🤖 **Bot de Comptage de Cartes** 🃏\n\n"
-            "Bonjour ! Je compte les cartes séparément pour chaque canal.\n\n"
-            "📝 **Comment ça marche :**\n"
-            "• Envoyez un message avec des cartes entre parenthèses\n"
-            "• Exemple : Résultat du tirage (❤️♦️♣️♠️)\n\n"
-            "🎯 **Symboles reconnus :**\n"
-            "❤️ Cœurs • ♦️ Carreaux • ♣️ Trèfles • ♠️ Piques\n\n"
-            "📊 **Compteurs séparés par canal !**\n"
-            "⚡ Bot actif avec webhook sur Render.com !"
-        )
-        await update.message.reply_text(welcome_msg)
-        
-    except Exception as e:
-        logger.error(f"Erreur dans la commande start: {e}")
-
-# Route webhook principal
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Endpoint webhook pour recevoir les mises à jour de Telegram"""
-    try:
-        update_data = request.get_json(force=True)
-        update = Update.de_json(update_data, bot_app.bot)
-        
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(bot_app.process_update(update))
-        finally:
-            loop.close()
-        
-        return jsonify({"status": "ok"})
-    except Exception as e:
-        logger.error(f"Erreur webhook: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-# Route de santé pour Render.com
-@app.route('/health')
-def health():
-    """Endpoint de santé pour Render.com"""
-    return jsonify({
-        "status": "healthy", 
-        "bot": "running",
-        "service": "webhook_active",
-        "timestamp": str(__import__('datetime').datetime.now())
-    })
-
-# Route principale
 @app.route('/')
 def index():
-    """Page d'accueil avec informations du service"""
+    return "🤖 Joker Bot Webhook en ligne !"
+
+@app.route('/api/status')
+def api_status():
+    status = get_bot_status()
+    try:
+        with open("compteurs_global.json", "r") as f:
+            counters = json.load(f)
+    except:
+        counters = {"❤️": 0, "♦️": 0, "♣️": 0, "♠️": 0}
+
+    messages_count = get_messages_count()
+    styles = get_all_styles()
+
     return jsonify({
-        "service": "Bot Telegram Webhook - Render.com Ready",
-        "status": "active",
-        "webhook_url": "/webhook",
-        "health_url": "/health",
-        "port": os.environ.get("PORT", "Auto-detected"),
-        "version": "2.0.0"
+        'bot_status': status,
+        'counters': counters,
+        'messages_processed': messages_count,
+        'current_style': current_style,
+        'styles': styles
     })
 
-def setup_bot():
-    """Configure le bot Telegram avec webhook"""
-    global bot_app
-    
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        logger.error("❌ TELEGRAM_BOT_TOKEN non défini dans les variables d'environnement!")
-        raise ValueError("TELEGRAM_BOT_TOKEN non défini - Configurez-le dans Render.com")
-    
-    logger.info(f"✅ Token détecté: {token[:10]}...")
-    
-    if not token:
-        logger.error("TELEGRAM_BOT_TOKEN non défini!")
-        raise ValueError("TELEGRAM_BOT_TOKEN non défini")
-    
-    bot_app = Application.builder().token(token).build()
-    
-    bot_app.add_handler(CommandHandler("start", start_cmd))
-    bot_app.add_handler(CommandHandler("reset", reset_cmd))
-    bot_app.add_handler(MessageHandler(filters.ALL, handle_message))
-    
-    webhook_url = os.getenv("WEBHOOK_URL")
-    if not webhook_url:
-        # Auto-détecter l'URL Render.com
-        render_service_name = os.getenv("RENDER_SERVICE_NAME", "telegram-bot-webhook")
-        webhook_url = f"https://{render_service_name}.onrender.com"
-        logger.info(f"🔧 WEBHOOK_URL auto-détectée: {webhook_url}")
-    
+@app.route('/api/reset', methods=['POST'])
+def api_reset():
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            webhook_full_url = f"{webhook_url}/webhook"
-            loop.run_until_complete(bot_app.bot.set_webhook(url=webhook_full_url))
-            logger.info(f"✅ Webhook configuré: {webhook_full_url}")
-        finally:
-            loop.close()
+        import glob
+        for file in glob.glob("compteurs_*.json"):
+            os.remove(file)
+        reset_messages_traite()
+        return jsonify({'success': True, 'message': 'Reset completed'})
     except Exception as e:
-        logger.error(f"❌ Erreur configuration webhook: {e}")
-        # Ne pas arrêter le serveur si webhook échoue
-        logger.info("🔄 Le serveur continuera de démarrer...")
-    
-    load_processed_messages()
-    logger.info("✅ Bot configuré avec succès")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/style', methods=['POST'])
+def api_style():
+    global current_style
+    try:
+        data = request.get_json()
+        new_style = int(data.get('style', 1))
+        if 1 <= new_style <= 5:
+            current_style = new_style
+            return jsonify({'success': True, 'message': f'Style {new_style} sélectionné'})
+        else:
+            return jsonify({'success': False, 'error': 'Style doit être entre 1 et 5'}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ========== TELEGRAM BOT ==========
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🤖 Joker 3K est en ligne !")
+
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    canal_id = update.effective_chat.id
+    reset_compteurs_canal(canal_id)
+    reset_messages_traite()
+    await update.message.reply_text("Compteurs et historique réinitialisés.")
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    canal_id = update.effective_chat.id
+    message_id = message.message_id
+
+    # Mise à jour du statut dans un fichier
+    status = {
+        "running": True,
+        "last_message": message.text[:100] if message.text else "",
+        "error": None
+    }
+    with open("bot_status.json", "w", encoding="utf-8") as f:
+        json.dump(status, f)
+
+    if not message.text:
+        return
+
+    if message_deja_traite(canal_id, message_id):
+        return
+
+    text = message.text
+    cartes = re.findall(r"\(([^\(\)]+)\)", text)
+    if not cartes:
+        return
+
+    premiere_parenthese = cartes[0]
+    symboles = re.findall(r"[❤️♦️♣️♠️]", premiere_parenthese)
+    if not symboles:
+        return
+
+    update_compteurs(canal_id, symboles)
+    ajouter_message_traite(canal_id, message_id)
+
+    compteur_text = afficher_compteurs_canal(canal_id, current_style)
+    await message.reply_text(compteur_text)
+
+# ========== LANCEMENT ==========
+@app.route(f"/webhook/{TOKEN}", methods=["POST"])
+async def webhook():
+    if request.method == "POST":
+        update = Update.de_json(request.get_json(force=True), bot)
+        await application.update_queue.put(update)
+        return "OK", 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    
-    logger.info(f"🚀 Démarrage du serveur webhook sur le port {port}")
-    logger.info(f"🌐 Configuration Render.com détectée")
-    logger.info(f"🔧 Variables d'environnement disponibles: {list(os.environ.keys())}")
-    
-    try:
-        logger.info("📱 Configuration du bot Telegram...")
-        setup_bot()
-        logger.info("✅ Bot configuré avec succès")
-        
-        logger.info(f"🌐 Démarrage serveur Flask sur 0.0.0.0:{port}")
-        app.run(
-            host="0.0.0.0", 
-            port=port, 
-            debug=False,
-            threaded=True,
-            use_reloader=False
-        )
-    except Exception as e:
-        logger.error(f"❌ Erreur critique au démarrage: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-        
+    application = Application.builder().token(TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("reset", reset_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+
+    bot = application.bot
+
+    # Démarrer le bot dans un thread asyncio
+    async def run_bot():
+        await application.initialize()
+        await application.start()
+        logger.info("Bot démarré avec succès")
+        await application.updater.start_polling()
+        await application.updater.idle()
+
+    import threading
+    loop = asyncio.get_event_loop()
+    threading.Thread(target=loop.run_until_complete, args=(run_bot(),)).start()
+
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
