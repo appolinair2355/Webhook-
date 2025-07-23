@@ -5,16 +5,15 @@ Bot Telegram avec webhook Flask pour Render.com
 
 import os
 import logging
-import json
-import asyncio
-from flask import Flask, request
+import sys
+import signal
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
+from telegram.ext import ContextTypes
+from compteur import get_compteurs, update_compteurs, reset_compteurs_canal
+from style import afficher_compteurs_canal
+import re
+import json
 )
 from style import afficher_compteurs_canal
 from compteur import get_compteurs, update_compteurs, reset_compteurs_canal
