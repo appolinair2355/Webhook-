@@ -3,11 +3,12 @@
 Simple web interface for the card counting bot
 """
 import json
+import os
 from flask import Flask, render_template, jsonify, request
 from compteur import get_compteurs, reset_compteurs
 from historique import get_messages_count, reset_messages_traite
 from style import get_all_styles
-import os
+import glob
 
 app = Flask(__name__)
 current_style = 1
@@ -31,10 +32,7 @@ def index():
 def api_status():
     """API: Get current status"""
     status = get_bot_status()
-    # Get counters for all channels or default empty
     try:
-        # Try to load from file directly
-        import json
         with open("compteurs_global.json", "r") as f:
             counters = json.load(f)
     except:
@@ -55,9 +53,6 @@ def api_status():
 def api_reset():
     """API: Reset counters and history"""
     try:
-        # Reset all channel counters
-        import os
-        import glob
         for file in glob.glob("compteurs_*.json"):
             os.remove(file)
         reset_messages_traite()
@@ -80,6 +75,12 @@ def api_style():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
+# ✅ Fonction utilisée par Render ou d'autres fichiers
+def main():
+    from waitress import serve
+    serve(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
+# ✅ Démarrage local si exécuté directement
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
