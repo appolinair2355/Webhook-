@@ -1,302 +1,85 @@
-
 #!/usr/bin/env python3
 """
-Bot with separated counters per channel
+Simple web interface for the card counting bot
 """
-import os
-import logging
-import sys
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
-from telegram import Update
-from telegram.ext import ContextTypes
-from compteur import get_compteurs, update_compteurs, reset_compteurs_canal
-from style import afficher_compteurs_canal
-import re
 import json
+from flask import Flask, render_template, jsonify, request
+from compteur import get_compteurs, reset_compteurs
+from historique import get_messages_count, reset_messages_traite
+from style import get_all_styles
+import os
 
-# Track processed messages per channel
-processed_messages = set()
+app = Flask(__name__)
+current_style = 1
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Global variables
-style_affichage = 1
-
-def save_bot_status(running, message=None, error=None):
-    """Save status to file"""
-    status = {
-        "running": running,
-        "last_message": message,
-        "error": error
-    }
+def get_bot_status():
+    """Get bot status from JSON file"""
     try:
-        with open("bot_status.json", "w") as f:
-            json.dump(status, f)
+        with open("bot_status.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"running": False, "last_message": "Bot not started", "error": None}
+    except json.JSONDecodeError:
+        return {"running": False, "last_message": "Error reading status", "error": "JSON decode error"}
+
+@app.route('/')
+def index():
+    """Main dashboard"""
+    return render_template('index.html')
+
+@app.route('/api/status')
+def api_status():
+    """API: Get current status"""
+    status = get_bot_status()
+    # Get counters for all channels or default empty
+    try:
+        # Try to load from file directly
+        import json
+        with open("compteurs_global.json", "r") as f:
+            counters = json.load(f)
     except:
-        pass
+        counters = {"❤️": 0, "♦️": 0, "♣️": 0, "♠️": 0}
 
-def is_message_processed(message_key):
-    """Check if message was already processed"""
-    return message_key in processed_messages
+    messages_count = get_messages_count()
+    styles = get_all_styles()
 
-def mark_message_processed(message_key):
-    """Mark message as processed"""
-    processed_messages.add(message_key)
-    
-def load_processed_messages():
-    """Load processed messages from file"""
-    global processed_messages
+    return jsonify({
+        'bot_status': status,
+        'counters': counters,
+        'messages_processed': messages_count,
+        'current_style': current_style,
+        'styles': styles
+    })
+
+@app.route('/api/reset', methods=['POST'])
+def api_reset():
+    """API: Reset counters and history"""
     try:
-        with open("processed_messages.json", "r") as f:
-            processed_messages = set(json.load(f))
-    except:
-        processed_messages = set()
-
-def save_processed_messages():
-    """Save processed messages to file"""
-    try:
-        with open("processed_messages.json", "w") as f:
-            json.dump(list(processed_messages), f)
-    except:
-        pass
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages and edited messages"""
-    global style_affichage
-    
-    # Get message from any source (including edited messages)
-    msg = update.message or update.channel_post or update.edited_channel_post or update.edited_message
-    if not msg or not msg.text:
-        return
-    
-    text = msg.text
-    chat_id = msg.chat_id
-    
-    # Detect if this is an edited message
-    is_edited = update.edited_channel_post or update.edited_message
-    
-    logger.info(f"Channel {chat_id}: {'[EDITED] ' if is_edited else ''}{text[:80]}")
-    
-    # Check for message number
-    match_numero = re.search(r"#n(\d+)", text)
-    if not match_numero:
-        return
-        
-    numero = int(match_numero.group(1))
-    message_key = f"{chat_id}_{numero}"
-    
-    # Check for progress indicators
-    progress_indicators = ['⏰', '▶', '🕐', '➡️']
-    confirmation_symbols = ['✅', '🔰']
-    
-    has_progress = any(indicator in text for indicator in progress_indicators)
-    has_confirmation = any(symbol in text for symbol in confirmation_symbols)
-    
-    # If message has progress indicators without confirmation, wait for final version
-    if has_progress and not has_confirmation:
-        logger.info(f"Message #{numero} has progress indicators, waiting for final version")
-        return
-    
-    # For final messages (no progress indicators OR with confirmation):
-    # - If already processed and not edited, skip
-    # - If edited or not processed, proceed
-    if is_message_processed(message_key):
-        if not is_edited:
-            logger.info(f"Message #{numero} already processed and not edited, skipping")
-            return
-        else:
-            logger.info(f"Message #{numero} was edited, reprocessing...")
-            # For edited messages, we need to subtract previous counts first
-            # This will be handled by resetting and recounting
-    
-    # Mark as processed (or update if edited)
-    mark_message_processed(message_key)
-    save_processed_messages()
-    
-    # Find FIRST parentheses only
-    match = re.search(r'\(([^()]*)\)', text)
-    if not match:
-        logger.info("No parentheses found")
-        return
-    
-    content = match.group(1)
-    logger.info(f"Channel {chat_id} - Content: '{content}'")
-    
-    # Count ALL card symbols in the content (including both heart symbols)
-    cards_found = {}
-    total_cards = 0
-    
-    # Check for hearts (both symbols)
-    heart_count = content.count("❤️") + content.count("♥️")
-    if heart_count > 0:
-        update_compteurs(chat_id, "❤️", heart_count)
-        cards_found["❤️"] = heart_count
-        total_cards += heart_count
-    
-    # Check other symbols
-    for symbol in ["♦️", "♣️", "♠️"]:
-        count = content.count(symbol)
-        if count > 0:
-            update_compteurs(chat_id, symbol, count)
-            cards_found[symbol] = count
-            total_cards += count
-    
-    if not cards_found:
-        logger.info(f"No card symbols found in: '{content}'")
-        return
-    
-    logger.info(f"Channel {chat_id} - Cards counted: {cards_found}")
-    
-    save_bot_status(True, f"Channel {chat_id}: {cards_found}")
-    
-    try:
-        # Get updated counters and send response
-        compteurs_updated = get_compteurs(chat_id)
-        response = afficher_compteurs_canal(compteurs_updated, style_affichage)
-        await msg.reply_text(response)
-        logger.info(f"Response sent to channel {chat_id}")
+        # Reset all channel counters
+        import os
+        import glob
+        for file in glob.glob("compteurs_*.json"):
+            os.remove(file)
+        reset_messages_traite()
+        return jsonify({'success': True, 'message': 'Reset completed'})
     except Exception as e:
-        logger.error(f"Send error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
-async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Reset command"""
-    if not update.message:
-        return
-        
-    chat_id = update.message.chat_id
-    reset_compteurs_canal(chat_id)
-    
-    # Clear processed messages for this channel
-    global processed_messages
-    processed_messages = {key for key in processed_messages if not key.startswith(f"{chat_id}_")}
-    save_processed_messages()
-    
-    await update.message.reply_text("✅ Reset done for this channel")
-    save_bot_status(True, f"Reset completed for channel {chat_id}")
-
-async def deposer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Create deployment package and send it"""
-    if not update.message:
-        return
-    
+@app.route('/api/style', methods=['POST'])
+def api_style():
+    """API: Change display style"""
+    global current_style
     try:
-        await update.message.reply_text("📦 Création du package de déploiement en cours...")
-        
-        # Import and run the deployment package creation
-        from create_deploy_package import create_deployment_package
-        zip_filename = create_deployment_package()
-        
-        # Check if file exists
-        if os.path.exists(zip_filename):
-            # Send the ZIP file
-            await update.message.reply_document(
-                document=open(zip_filename, 'rb'),
-                filename=zip_filename,
-                caption="✅ Package de déploiement créé avec succès !\n🚀 Prêt pour upload sur render.com"
-            )
-            logger.info(f"ZIP file sent: {zip_filename}")
+        data = request.get_json()
+        new_style = int(data.get('style', 1))
+        if 1 <= new_style <= 5:
+            current_style = new_style
+            return jsonify({'success': True, 'message': f'Style {new_style} selected'})
         else:
-            await update.message.reply_text("❌ Erreur : fichier ZIP non trouvé")
-        
-        save_bot_status(True, "Deployment package sent")
-        
+            return jsonify({'success': False, 'error': 'Style must be 1-5'}), 400
     except Exception as e:
-        await update.message.reply_text(f"❌ Erreur : {str(e)}")
-        logger.error(f"Error in deposer command: {e}")
-
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command"""
-    welcome_msg = (
-        "🤖 **Bot de Comptage de Cartes** 🃏\n\n"
-        "Bonjour ! Je compte les cartes séparément pour chaque canal.\n\n"
-        "📝 **Comment ça marche :**\n"
-        "• Envoyez un message avec des cartes entre parenthèses\n"
-        "• Exemple : Résultat du tirage (❤️♦️♣️♠️)\n"
-        "• Je compterai automatiquement chaque symbole\n\n"
-        "🎯 **Symboles reconnus :**\n"
-        "❤️ Cœurs • ♦️ Carreaux • ♣️ Trèfles • ♠️ Piques\n\n"
-        "💡 **Commandes disponibles :**\n"
-        "• /reset - Réinitialiser les compteurs\n"
-        "• /deposer - Créer package de déploiement\n\n"
-        "⚡ Je suis maintenant actif et prêt à compter !"
-    )
-    if update.message:
-        await update.message.reply_text(welcome_msg)
-        chat_id = update.message.chat_id
-        save_bot_status(True, f"Bot started in channel {chat_id}")
-
-async def new_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle when bot is added to a group or channel"""
-    if not update.message or not update.message.new_chat_members:
-        return
-    
-    # Check if the bot itself was added
-    for member in update.message.new_chat_members:
-        if member.id == context.bot.id:
-            welcome_msg = (
-                "👋 **Salut tout le monde !** 🃏\n\n"
-                "Je suis le **Bot de Comptage de Cartes** !\n\n"
-                "🎯 **Ma mission :**\n"
-                "Je vais compter automatiquement tous les symboles de cartes "
-                "que vous mettez entre parenthèses dans vos messages.\n\n"
-                "📋 **Les compteurs sont séparés par canal !**\n"
-                "Chaque canal aura ses propres totaux.\n\n"
-                "🃏 **Cartes reconnues :**\n"
-                "❤️ Cœurs • ♦️ Carreaux • ♣️ Trèfles • ♠️ Piques\n\n"
-                "⚡ **Je suis maintenant actif !**\n\n"
-                "💡 Commandes utiles :\n"
-                "• /reset - Réinitialiser les compteurs de ce canal\n"
-                "• /start - Revoir ce message"
-            )
-            
-            await context.bot.send_message(
-                chat_id=update.message.chat_id,
-                text=welcome_msg
-            )
-            chat_id = update.message.chat_id
-            save_bot_status(True, f"Bot added to channel {chat_id}")
-            logger.info(f"Bot added to chat: {chat_id}")
-            break
-
-def main():
-    """Main function"""
-    # Get token
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        save_bot_status(False, error="No token")
-        sys.exit(1)
-    
-    # Load processed messages
-    load_processed_messages()
-    
-    logger.info("Starting bot...")
-    save_bot_status(True, "Starting...")
-    
-    # Create app
-    app = Application.builder().token(token).build()
-    
-    # Add handlers for messages AND edited messages
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("reset", reset_cmd))  
-    app.add_handler(CommandHandler("deposer", deposer_cmd))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_chat_member))
-    
-    # Handle all messages (new, edited, channel posts, etc.)
-    app.add_handler(MessageHandler(filters.ALL, handle_message))
-    
-    logger.info("Bot ready")
-    save_bot_status(True, "Bot online")
-    
-    # Run with both new and edited messages enabled
-    app.run_polling(allowed_updates=["message", "edited_message", "channel_post", "edited_channel_post"])
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        save_bot_status(False, "Stopped")
-    except Exception as e:
-        save_bot_status(False, error=str(e))
-        logger.error(f"Error: {e}")
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
