@@ -10,8 +10,7 @@ import re
 import asyncio
 from flask import Flask, request, jsonify
 from telegram import Update, Bot
-from launch_bot
-from 
+import launch_bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from compteur import get_compteurs, update_compteurs, reset_compteurs_canal
 from style import afficher_compteurs_canal
