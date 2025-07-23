@@ -14,7 +14,6 @@ from compteur import get_compteurs, update_compteurs, reset_compteurs_canal
 from style import afficher_compteurs_canal
 import re
 import json
-)
 from style import afficher_compteurs_canal
 from compteur import get_compteurs, update_compteurs, reset_compteurs_canal
 from dotenv import load_dotenv
